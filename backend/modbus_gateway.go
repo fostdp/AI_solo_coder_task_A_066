@@ -55,9 +55,16 @@ func (g *ModbusGateway) Run(ctx context.Context) {
 			g.invalidateConnection()
 			return
 		case <-ticker.C:
+			start := time.Now()
 			data, err := g.collect()
+			elapsed := time.Since(start).Seconds()
+			errCount := 0
 			if err != nil {
+				errCount = 1
 				log.Println("modbus collect error:", err)
+			}
+			ObserveModbusCollect(elapsed, errCount)
+			if err != nil {
 				continue
 			}
 			if data != nil {

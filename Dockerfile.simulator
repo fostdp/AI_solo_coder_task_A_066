@@ -1,0 +1,12 @@
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+COPY simulator/modbus_simulator.py .
+
+RUN adduser -D -s /bin/sh simuser
+USER simuser
+
+EXPOSE 502
+
+ENTRYPOINT ["python", "modbus_simulator.py"]

@@ -1,0 +1,64 @@
+version: "3.8"
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.13.1-pg15
+    container_name: dc-cooling-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dc_cooling
+    ports:
+      - "5432:5432"
+    volumes:
+      - tsdb-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  modbus-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: dc-cooling-simulator
+    command:
+      - "--host=0.0.0.0"
+      - "--port=5020"
+      - "--anomaly-prob=0.03"
+      - "--low-cop=2.5"
+    ports:
+      - "5020:5020"
+    depends_on: []
+    restart: unless-stopped
+
+  go-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dc-cooling-server
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: dc_cooling
+      HTTP_PORT: "8080"
+      MODBUS_HOST: modbus-simulator
+      MODBUS_PORT: "5020"
+      CONFIG_PATH: /etc/dc-cooling/config.json
+      DINGTALK_WEBHOOK: ""
+    ports:
+      - "8080:8080"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      modbus-simulator:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  tsdb-data:

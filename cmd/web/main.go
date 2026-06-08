@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"sync"
 
 	"dc-cooling-platform/backend"
@@ -130,6 +131,7 @@ func eventRouter(ctx context.Context, hub *WebSocketHub, gateway *backend.Modbus
 			}
 
 		case record := <-pueOut:
+			backend.SetPUEMetrics(record.PUEValue, record.CoolingPower, record.ITPower)
 			msg, _ := json.Marshal(backend.WSMessage{Type: "pue_update", Data: record})
 			hub.broadcast <- msg
 			select {
@@ -148,6 +150,9 @@ func eventRouter(ctx context.Context, hub *WebSocketHub, gateway *backend.Modbus
 			hub.broadcast <- msg
 
 		case alarms := <-alarmOut:
+			for _, a := range alarms {
+				backend.IncAlarms(a.AlarmLevel)
+			}
 			msg, _ := json.Marshal(backend.WSMessage{Type: "alarm", Data: alarms})
 			hub.broadcast <- msg
 		}
@@ -185,6 +190,14 @@ func main() {
 		handleWebSocket(hub, w, r)
 	})
 
+	r.Handle("/metrics", backend.PrometheusHandler())
+
+	r.HandleFunc("/debug/pprof/", pprof.Index)
+	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
 	api := r.PathPrefix("/api").Subrouter()
 	api.HandleFunc("/devices", backend.HandleGetDevices).Methods("GET")
 	api.HandleFunc("/devices/states", backend.HandleGetDeviceStates).Methods("GET")
@@ -201,15 +214,16 @@ func main() {
 
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./frontend/")))
 
+	handler := backend.GzipMiddleware(backend.MetricsMiddleware(r))
+
 	srv := &http.Server{
-		Addr:         ":" + cfg.HTTPPort,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    ":" + cfg.HTTPPort,
+		Handler: handler,
 	}
 
 	log.Println("Server starting on port", cfg.HTTPPort)
+	log.Println("pprof:   http://localhost:" + cfg.HTTPPort + "/debug/pprof/")
+	log.Println("metrics: http://localhost:" + cfg.HTTPPort + "/metrics")
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal("Server error:", err)
 	}

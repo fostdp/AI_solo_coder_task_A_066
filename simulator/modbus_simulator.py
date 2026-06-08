@@ -4,14 +4,23 @@ import threading
 import time
 import random
 import math
+import argparse
+import json
+import sys
+
 
 class ModbusDevice:
-    def __init__(self, slave_id, device_type, device_name):
+    def __init__(self, slave_id, device_type, device_name, anomaly_prob=0.03, low_cop=2.5, interval=30):
         self.slave_id = slave_id
         self.device_type = device_type
         self.device_name = device_name
         self.registers = [0] * 20
         self.running = True
+        self.anomaly_prob = anomaly_prob
+        self.low_cop = low_cop
+        self.interval = interval
+        self.anomaly_active = False
+        self.anomaly_end_time = 0
         self._init_registers()
 
     def _init_registers(self):
@@ -56,12 +65,19 @@ class ModbusDevice:
             self.registers[7] = int(20.0 * 10)
             self.registers[8] = 1
 
+    def inject_anomaly(self, duration=300):
+        self.anomaly_active = True
+        self.anomaly_end_time = time.time() + duration
+
     def simulate(self):
         cycle = 0
         while self.running:
             cycle += 1
             t = cycle * 0.05
             noise = lambda base, amp: base + amp * math.sin(t + self.slave_id * 0.7) + random.uniform(-amp * 0.3, amp * 0.3)
+
+            if self.anomaly_active and time.time() > self.anomaly_end_time:
+                self.anomaly_active = False
 
             if self.device_type == 'chiller':
                 self.registers[0] = int(noise(7.2, 0.5) * 10)
@@ -70,8 +86,8 @@ class ModbusDevice:
                 self.registers[3] = int(noise(850.0, 50.0) * 10)
                 self.registers[4] = int(noise(0.8, 0.05) * 10)
                 cop = noise(6.2, 0.8)
-                if random.random() < 0.02:
-                    cop = noise(3.5, 0.3)
+                if self.anomaly_active or random.random() < self.anomaly_prob:
+                    cop = noise(self.low_cop, 0.3)
                 self.registers[5] = int(cop * 100)
                 self.registers[6] = int(noise(4200.0, 200.0) * 10)
                 self.registers[7] = int(noise(8.0, 0.5) * 10)
@@ -81,7 +97,10 @@ class ModbusDevice:
                 self.registers[2] = int(noise(250.0, 20.0) * 10)
                 self.registers[3] = int(noise(55.0, 5.0) * 10)
                 self.registers[4] = int(noise(0.3, 0.02) * 10)
-                self.registers[5] = int(noise(5.5, 0.6) * 100)
+                cop = noise(5.5, 0.6)
+                if self.anomaly_active or random.random() < self.anomaly_prob:
+                    cop = noise(self.low_cop, 0.3)
+                self.registers[5] = int(cop * 100)
                 self.registers[6] = int(noise(3500.0, 150.0) * 10)
                 self.registers[7] = int(noise(30.0, 2.0) * 10)
             elif self.device_type == 'precision_ac':
@@ -91,8 +110,8 @@ class ModbusDevice:
                 self.registers[3] = int(noise(35.0, 3.0) * 10)
                 self.registers[4] = int(noise(0.6, 0.03) * 10)
                 cop = noise(4.8, 0.6)
-                if random.random() < 0.03:
-                    cop = noise(2.8, 0.2)
+                if self.anomaly_active or random.random() < self.anomaly_prob:
+                    cop = noise(self.low_cop, 0.2)
                 self.registers[5] = int(cop * 100)
                 self.registers[6] = int(noise(150.0, 10.0) * 10)
                 self.registers[7] = int(noise(24.0, 0.5) * 10)
@@ -102,12 +121,15 @@ class ModbusDevice:
                 self.registers[2] = int(noise(8.0, 0.5) * 10)
                 self.registers[3] = int(noise(22.0, 2.0) * 10)
                 self.registers[4] = int(noise(0.5, 0.02) * 10)
-                self.registers[5] = int(noise(5.0, 0.5) * 100)
+                cop = noise(5.0, 0.5)
+                if self.anomaly_active or random.random() < self.anomaly_prob:
+                    cop = noise(self.low_cop, 0.3)
+                self.registers[5] = int(cop * 100)
                 self.registers[6] = int(noise(200.0, 15.0) * 10)
                 self.registers[7] = int(noise(20.0, 0.3) * 10)
 
-            self.registers[8] = 1 if random.random() > 0.005 else 0
-            time.sleep(30)
+            self.registers[8] = 1 if (not self.anomaly_active and random.random() > 0.005) else 0
+            time.sleep(self.interval)
 
     def handle_request(self, function_code, start_addr, quantity):
         if function_code == 0x03:
@@ -123,36 +145,53 @@ class ModbusDevice:
 
 
 class ModbusTCPSimulator:
-    def __init__(self, host='0.0.0.0', port=502):
+    def __init__(self, host='0.0.0.0', port=502, chillers=8, towers=12, pacs=80, cdus=20,
+                 anomaly_prob=0.03, low_cop=2.5, interval=30):
         self.host = host
         self.port = port
         self.devices = {}
         self.transaction_id = 0
-        self._create_devices()
+        self.anomaly_prob = anomaly_prob
+        self.low_cop = low_cop
+        self.interval = interval
+        self._create_devices(chillers, towers, pacs, cdus)
 
-    def _create_devices(self):
-        for i in range(1, 9):
-            dev = ModbusDevice(i, 'chiller', f'CHU-{i:03d}')
+    def _create_devices(self, chillers, towers, pacs, cdus):
+        for i in range(1, chillers + 1):
+            dev = ModbusDevice(i, 'chiller', f'CHU-{i:03d}',
+                               anomaly_prob=self.anomaly_prob, low_cop=self.low_cop, interval=self.interval)
             self.devices[i] = dev
-        for i in range(9, 21):
-            dev = ModbusDevice(i, 'cooling_tower', f'CT-{i-8:03d}')
+        for i in range(chillers + 1, chillers + towers + 1):
+            dev = ModbusDevice(i, 'cooling_tower', f'CT-{i - chillers:03d}',
+                               anomaly_prob=self.anomaly_prob, low_cop=self.low_cop, interval=self.interval)
             self.devices[i] = dev
-        for i in range(21, 101):
-            dev = ModbusDevice(i, 'precision_ac', f'PAC-{i-20:03d}')
+        for i in range(chillers + towers + 1, chillers + towers + pacs + 1):
+            dev = ModbusDevice(i, 'precision_ac', f'PAC-{i - chillers - towers:03d}',
+                               anomaly_prob=self.anomaly_prob, low_cop=self.low_cop, interval=self.interval)
             self.devices[i] = dev
-        for i in range(101, 121):
-            dev = ModbusDevice(i, 'cdu', f'CDU-{i-100:03d}')
+        for i in range(chillers + towers + pacs + 1, chillers + towers + pacs + cdus + 1):
+            dev = ModbusDevice(i, 'cdu', f'CDU-{i - chillers - towers - pacs:03d}',
+                               anomaly_prob=self.anomaly_prob, low_cop=self.low_cop, interval=self.interval)
             self.devices[i] = dev
+
+    def inject_anomaly(self, device_type=None, duration=300):
+        count = 0
+        for dev in self.devices.values():
+            if device_type is None or dev.device_type == device_type:
+                dev.inject_anomaly(duration)
+                count += 1
+        return count
 
     def start(self):
         print(f"Modbus TCP Simulator starting on {self.host}:{self.port}")
         print(f"Devices: {len(self.devices)} total")
-        print(f"  Chillers: slave 1-8")
-        print(f"  Cooling Towers: slave 9-20")
-        print(f"  Precision ACs: slave 21-100")
-        print(f"  CDUs: slave 101-120")
-        print(f"  Registers per device: 10 (supply_temp, return_temp, flow_rate, power, pressure, cop*100, cooling_capacity, setpoint_temp, status, reserved)")
-        print(f"  Update interval: 30 seconds")
+        print(f"  Chillers: {sum(1 for d in self.devices.values() if d.device_type == 'chiller')} (slave 1-{sum(1 for d in self.devices.values() if d.device_type == 'chiller')})")
+        print(f"  Cooling Towers: {sum(1 for d in self.devices.values() if d.device_type == 'cooling_tower')}")
+        print(f"  Precision ACs: {sum(1 for d in self.devices.values() if d.device_type == 'precision_ac')}")
+        print(f"  CDUs: {sum(1 for d in self.devices.values() if d.device_type == 'cdu')}")
+        print(f"  Anomaly probability: {self.anomaly_prob} (random per cycle)")
+        print(f"  Low COP threshold: {self.low_cop}")
+        print(f"  Update interval: {self.interval}s")
 
         for dev in self.devices.values():
             t = threading.Thread(target=dev.simulate, daemon=True)
@@ -207,7 +246,7 @@ class ModbusTCPSimulator:
                     err_pdu = struct.pack('BB', function_code | 0x80, 0x01)
                     err_header = struct.pack('>HHHB', tx_id, 0, len(err_pdu) + 1, unit_id)
                     client.sendall(err_header + err_pdu)
-        except Exception as e:
+        except Exception:
             pass
         finally:
             client.close()
@@ -222,14 +261,94 @@ class ModbusTCPSimulator:
         return data
 
 
+class ControlServer:
+    def __init__(self, simulator, host='0.0.0.0', port=8081):
+        self.simulator = simulator
+        self.host = host
+        self.port = port
+
+    def start(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((self.host, self.port))
+        server.listen(5)
+        print(f"Control server listening on {self.host}:{self.port}")
+        print(f"  Send JSON commands: {{\"action\":\"inject_anomaly\",\"device_type\":\"chiller\",\"duration\":300}}")
+
+        while True:
+            try:
+                client, addr = server.accept()
+                t = threading.Thread(target=self._handle, args=(client,), daemon=True)
+                t.start()
+            except Exception:
+                break
+
+    def _handle(self, client):
+        try:
+            data = b''
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b'\n' in data:
+                    break
+
+            cmd = json.loads(data.decode().strip())
+            action = cmd.get('action', '')
+
+            if action == 'inject_anomaly':
+                device_type = cmd.get('device_type')
+                duration = cmd.get('duration', 300)
+                count = self.simulator.inject_anomaly(device_type=device_type, duration=duration)
+                resp = json.dumps({"status": "ok", "affected_devices": count, "duration": duration})
+                client.sendall((resp + '\n').encode())
+            elif action == 'status':
+                resp = json.dumps({"status": "ok", "total_devices": len(self.simulator.devices),
+                                   "anomaly_prob": self.simulator.anomaly_prob,
+                                   "low_cop": self.simulator.low_cop,
+                                   "interval": self.simulator.interval})
+                client.sendall((resp + '\n').encode())
+            else:
+                resp = json.dumps({"status": "error", "message": f"unknown action: {action}"})
+                client.sendall((resp + '\n').encode())
+        except Exception as e:
+            try:
+                client.sendall((json.dumps({"status": "error", "message": str(e)}) + '\n').encode())
+            except Exception:
+                pass
+        finally:
+            client.close()
+
+
 if __name__ == '__main__':
-    import argparse
     parser = argparse.ArgumentParser(description='Modbus TCP Simulator for DC Cooling Platform')
     parser.add_argument('--host', default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
-    parser.add_argument('--port', type=int, default=502, help='Listen port (default: 502)')
+    parser.add_argument('--port', type=int, default=502, help='Modbus listen port (default: 502)')
+    parser.add_argument('--chillers', type=int, default=8, help='Number of centrifugal chillers (default: 8)')
+    parser.add_argument('--towers', type=int, default=12, help='Number of cooling towers (default: 12)')
+    parser.add_argument('--pacs', type=int, default=80, help='Number of precision air conditioners (default: 80)')
+    parser.add_argument('--cdus', type=int, default=20, help='Number of liquid cooling CDUs (default: 20)')
+    parser.add_argument('--interval', type=int, default=30, help='Data update interval in seconds (default: 30)')
+    parser.add_argument('--anomaly-prob', type=float, default=0.03,
+                        help='Per-cycle probability of random COP anomaly 0.0-1.0 (default: 0.03)')
+    parser.add_argument('--low-cop', type=float, default=2.5,
+                        help='COP value used when anomaly is triggered (default: 2.5)')
+    parser.add_argument('--control-port', type=int, default=8081,
+                        help='Control server port for anomaly injection (default: 8081)')
     args = parser.parse_args()
 
-    sim = ModbusTCPSimulator(args.host, args.port)
+    sim = ModbusTCPSimulator(
+        host=args.host, port=args.port,
+        chillers=args.chillers, towers=args.towers,
+        pacs=args.pacs, cdus=args.cdus,
+        anomaly_prob=args.anomaly_prob, low_cop=args.low_cop,
+        interval=args.interval
+    )
+
+    ctrl = ControlServer(sim, host=args.host, port=args.control_port)
+    threading.Thread(target=ctrl.start, daemon=True).start()
+
     try:
         sim.start()
     except KeyboardInterrupt:

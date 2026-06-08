@@ -262,6 +262,35 @@ SELECT add_continuous_aggregate_policy('device_telemetry_1hour',
 SELECT add_retention_policy('device_telemetry', INTERVAL '90 days');
 SELECT add_retention_policy('pue_records', INTERVAL '365 days');
 SELECT add_retention_policy('alarms', INTERVAL '180 days');
+SELECT add_retention_policy('zone_cooling_demand', INTERVAL '90 days');
+SELECT add_retention_policy('optimization_suggestions', INTERVAL '180 days');
+SELECT add_retention_policy('it_power_readings', INTERVAL '365 days');
+
+ALTER TABLE device_telemetry SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'device_id',
+    timescaledb.compress_orderby = 'time DESC'
+);
+SELECT add_compression_policy('device_telemetry', INTERVAL '7 days');
+
+ALTER TABLE pue_records SET (
+    timescaledb.compress,
+    timescaledb.compress_orderby = 'time DESC'
+);
+SELECT add_compression_policy('pue_records', INTERVAL '14 days');
+
+ALTER TABLE zone_cooling_demand SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'zone',
+    timescaledb.compress_orderby = 'time DESC'
+);
+SELECT add_compression_policy('zone_cooling_demand', INTERVAL '7 days');
+
+ALTER TABLE it_power_readings SET (
+    timescaledb.compress,
+    timescaledb.compress_orderby = 'time DESC'
+);
+SELECT add_compression_policy('it_power_readings', INTERVAL '14 days');
 
 DO $$
 BEGIN
