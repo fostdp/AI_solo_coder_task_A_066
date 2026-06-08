@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大型数据中心制冷系统能效优化平台</title>
+<link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+<div class="app-container">
+<header class="header">
+<div class="header-left">
+<div class="logo">大型数据中心制冷系统能效优化平台</div>
+</div>
+<div class="header-center">
+<div class="pue-display">
+<span class="pue-label">PUE</span>
+<span class="pue-value" id="pue-value">1.42</span>
+<div class="pue-indicator" id="pue-indicator"></div>
+</div>
+</div>
+<div class="header-right">
+<div class="alarm-badges">
+<span class="badge badge-level1" id="alarm-level1">0</span>
+<span class="badge badge-level2" id="alarm-level2">0</span>
+</div>
+<div class="ws-status" id="ws-status">
+<span class="ws-dot"></span>
+<span class="ws-text">连接中</span>
+</div>
+</div>
+</header>
+
+<aside class="sidebar-left">
+<div class="sidebar-title">设备树</div>
+<div class="device-tree">
+<div class="device-group">
+<div class="device-group-header" data-group="chillers">
+<span class="expand-icon">▶</span>
+<span class="group-label">冷水机组</span>
+<span class="group-count">4</span>
+</div>
+<div class="device-group-items">
+<div class="device-item" data-device="chiller-1">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">1#冷水机组</span>
+<span class="device-cop">COP 5.2</span>
+</div>
+<div class="device-item" data-device="chiller-2">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">2#冷水机组</span>
+<span class="device-cop">COP 5.0</span>
+</div>
+<div class="device-item" data-device="chiller-3">
+<span class="status-dot" data-status="warning"></span>
+<span class="device-name">3#冷水机组</span>
+<span class="device-cop">COP 4.1</span>
+</div>
+<div class="device-item" data-device="chiller-4">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">4#冷水机组</span>
+<span class="device-cop">COP 5.1</span>
+</div>
+</div>
+</div>
+<div class="device-group">
+<div class="device-group-header" data-group="cooling-towers">
+<span class="expand-icon">▶</span>
+<span class="group-label">冷却塔</span>
+<span class="group-count">3</span>
+</div>
+<div class="device-group-items">
+<div class="device-item" data-device="tower-1">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">1#冷却塔</span>
+<span class="device-cop">COP 3.8</span>
+</div>
+<div class="device-item" data-device="tower-2">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">2#冷却塔</span>
+<span class="device-cop">COP 3.6</span>
+</div>
+<div class="device-item" data-device="tower-3">
+<span class="status-dot" data-status="error"></span>
+<span class="device-name">3#冷却塔</span>
+<span class="device-cop">COP 2.1</span>
+</div>
+</div>
+</div>
+<div class="device-group">
+<div class="device-group-header" data-group="precision-acs">
+<span class="expand-icon">▶</span>
+<span class="group-label">精密空调</span>
+<span class="group-count">6</span>
+</div>
+<div class="device-group-items">
+<div class="device-item" data-device="pac-1">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">1#精密空调</span>
+<span class="device-cop">COP 4.5</span>
+</div>
+<div class="device-item" data-device="pac-2">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">2#精密空调</span>
+<span class="device-cop">COP 4.3</span>
+</div>
+<div class="device-item" data-device="pac-3">
+<span class="status-dot" data-status="warning"></span>
+<span class="device-name">3#精密空调</span>
+<span class="device-cop">COP 3.5</span>
+</div>
+<div class="device-item" data-device="pac-4">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">4#精密空调</span>
+<span class="device-cop">COP 4.4</span>
+</div>
+<div class="device-item" data-device="pac-5">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">5#精密空调</span>
+<span class="device-cop">COP 4.6</span>
+</div>
+<div class="device-item" data-device="pac-6">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">6#精密空调</span>
+<span class="device-cop">COP 4.2</span>
+</div>
+</div>
+</div>
+<div class="device-group">
+<div class="device-group-header" data-group="cdus">
+<span class="expand-icon">▶</span>
+<span class="group-label">CDU列间空调</span>
+<span class="group-count">4</span>
+</div>
+<div class="device-group-items">
+<div class="device-item" data-device="cdu-1">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">1#CDU</span>
+<span class="device-cop">COP 6.1</span>
+</div>
+<div class="device-item" data-device="cdu-2">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">2#CDU</span>
+<span class="device-cop">COP 5.8</span>
+</div>
+<div class="device-item" data-device="cdu-3">
+<span class="status-dot" data-status="warning"></span>
+<span class="device-name">3#CDU</span>
+<span class="device-cop">COP 4.9</span>
+</div>
+<div class="device-item" data-device="cdu-4">
+<span class="status-dot" data-status="good"></span>
+<span class="device-name">4#CDU</span>
+<span class="device-cop">COP 5.9</span>
+</div>
+</div>
+</div>
+</div>
+</aside>
+
+<main class="main-content">
+<div class="tab-nav">
+<button class="tab-btn active" data-tab="scene3d">三维流程图</button>
+<button class="tab-btn" data-tab="pue-trend">PUE趋势</button>
+<button class="tab-btn" data-tab="sankey">冷量分布</button>
+<button class="tab-btn" data-tab="ranking">能效排行</button>
+</div>
+<div class="tab-content">
+<div class="tab-panel active" id="tab-scene3d">
+<div id="scene3d-container"></div>
+</div>
+<div class="tab-panel" id="tab-pue-trend">
+<canvas id="pue-chart"></canvas>
+</div>
+<div class="tab-panel" id="tab-sankey">
+<canvas id="sankey-chart"></canvas>
+</div>
+<div class="tab-panel" id="tab-ranking">
+<table id="ranking-table">
+<thead>
+<tr>
+<th>排名</th>
+<th>设备名称</th>
+<th>类型</th>
+<th>COP</th>
+<th>能效比</th>
+<th>状态</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+</main>
+
+<aside class="sidebar-right">
+<div class="sidebar-section">
+<div class="sidebar-title">告警列表</div>
+<div id="alarm-list"></div>
+</div>
+<div class="sidebar-section">
+<div class="sidebar-title">优化建议</div>
+<div id="suggestion-panel"></div>
+</div>
+</aside>
+</div>
+
+<div class="device-detail-overlay" id="device-detail-panel">
+<div class="device-detail-content">
+<div class="device-detail-header">
+<span class="device-detail-name" id="device-detail-name"></span>
+<button class="device-detail-close" id="device-detail-close">&times;</button>
+</div>
+<div class="device-detail-body">
+<div class="device-detail-params" id="device-detail-params"></div>
+<div class="device-detail-trend">
+<canvas id="device-trend-chart"></canvas>
+</div>
+</div>
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="static/js/scene3d.js"></script>
+<script src="static/js/charts.js"></script>
+<script src="static/js/app.js"></script>
+</body>
+</html>
