@@ -1,22 +1,83 @@
 package backend
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
+	"time"
 )
 
-type zoneData struct {
-	zone              string
-	setpoint          float64
-	currentTemp       float64
-	allocatedCooling  float64
-	power             float64
-	heatLoad          float64
-	optimalCooling    float64
+type CoolingOptimizer struct {
+	cfg      *Config
+	triggerCh chan *PUERecord
+	outCh    chan []OptimizationSuggestion
+	stopCh   chan struct{}
 }
 
-func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) {
+func NewCoolingOptimizer(cfg *Config) *CoolingOptimizer {
+	return &CoolingOptimizer{
+		cfg:      cfg,
+		triggerCh: make(chan *PUERecord, 8),
+		outCh:    make(chan []OptimizationSuggestion, 8),
+		stopCh:   make(chan struct{}),
+	}
+}
+
+func (o *CoolingOptimizer) TriggerCh() chan<- *PUERecord {
+	return o.triggerCh
+}
+
+func (o *CoolingOptimizer) Output() <-chan []OptimizationSuggestion {
+	return o.outCh
+}
+
+func (o *CoolingOptimizer) PUETriggerThreshold() float64 {
+	return o.cfg.PUE.PUEThreshold1
+}
+
+func (o *CoolingOptimizer) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(o.cfg.Optimization.IntervalSeconds) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			suggestions, err := o.optimize()
+			if err != nil {
+				log.Printf("optimization error: %v", err)
+				continue
+			}
+			if len(suggestions) > 0 {
+				select {
+				case o.outCh <- suggestions:
+				default:
+					log.Printf("optimization output channel full, dropping suggestions")
+				}
+			}
+		case record := <-o.triggerCh:
+			if record.PUEValue > o.cfg.PUE.PUEThreshold1 {
+				suggestions, err := o.optimize()
+				if err != nil {
+					log.Printf("optimization error: %v", err)
+					continue
+				}
+				if len(suggestions) > 0 {
+					select {
+					case o.outCh <- suggestions:
+					default:
+						log.Printf("optimization output channel full, dropping suggestions")
+					}
+				}
+			}
+		}
+	}
+}
+
+func (o *CoolingOptimizer) optimize() ([]OptimizationSuggestion, error) {
 	db := GetDB()
 
 	rows, err := db.Query(`SELECT d.zone, AVG(t.setpoint_temp) as setpoint, AVG(t.return_temp) as current_temp, SUM(t.cooling_capacity) as allocated, SUM(t.power) as power FROM devices d JOIN (SELECT DISTINCT ON (device_id) * FROM device_telemetry ORDER BY device_id, time DESC) t ON d.id = t.device_id WHERE d.device_type IN ('precision_ac','cdu') GROUP BY d.zone`)
@@ -24,6 +85,16 @@ func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) 
 		return nil, fmt.Errorf("query zone cooling data: %w", err)
 	}
 	defer rows.Close()
+
+	type zoneData struct {
+		zone             string
+		setpoint         float64
+		currentTemp      float64
+		allocatedCooling float64
+		power            float64
+		heatLoad         float64
+		optimalCooling   float64
+	}
 
 	var zones []zoneData
 	var totalHeatLoad float64
@@ -34,7 +105,7 @@ func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) 
 		if err := rows.Scan(&z.zone, &z.setpoint, &z.currentTemp, &z.allocatedCooling, &z.power); err != nil {
 			return nil, fmt.Errorf("scan zone data: %w", err)
 		}
-		z.heatLoad = z.allocatedCooling * (z.currentTemp - z.setpoint) / 10
+		z.heatLoad = z.allocatedCooling * (z.currentTemp - z.setpoint) / o.cfg.Optimization.HeatLoadDivisor
 		if z.heatLoad < 0 {
 			z.heatLoad = 0
 		}
@@ -58,24 +129,25 @@ func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) 
 	var suggestions []OptimizationSuggestion
 
 	for _, z := range zones {
-		var diff float64
-		if z.allocatedCooling != 0 {
-			diff = math.Abs(z.optimalCooling-z.allocatedCooling) / z.allocatedCooling
-		}
-
 		_, err := db.Exec(`INSERT INTO zone_cooling_demand (time, zone, setpoint_temp, current_temp, heat_load, allocated_cooling, optimal_cooling) VALUES (NOW(), $1, $2, $3, $4, $5, $6)`,
 			z.zone, z.setpoint, z.currentTemp, z.heatLoad, z.allocatedCooling, z.optimalCooling)
 		if err != nil {
 			return nil, fmt.Errorf("insert zone cooling demand: %w", err)
 		}
 
-		if diff > 0.05 {
+		var diff float64
+		if z.allocatedCooling != 0 {
+			diff = math.Abs(z.optimalCooling-z.allocatedCooling) / z.allocatedCooling
+		}
+
+		if diff > o.cfg.Optimization.DiffThreshold {
 			powerDiff := z.power * math.Abs(z.optimalCooling-z.allocatedCooling) / z.allocatedCooling
+			expectedSaving := powerDiff * o.cfg.Optimization.SavingRatio
 			reason := fmt.Sprintf("Zone %s: adjust cooling from %.1f to %.1f (heat load %.1f)", z.zone, z.allocatedCooling, z.optimalCooling, z.heatLoad)
 
 			var id int
 			err := db.QueryRow(`INSERT INTO optimization_suggestions (time, suggestion_type, zone, current_value, suggested_value, expected_saving, reason, status) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-				"cooling_redistribution", z.zone, z.allocatedCooling, z.optimalCooling, powerDiff*0.3, reason, "pending").Scan(&id)
+				"cooling_redistribution", z.zone, z.allocatedCooling, z.optimalCooling, expectedSaving, reason, "pending").Scan(&id)
 			if err != nil {
 				return nil, fmt.Errorf("insert optimization suggestion: %w", err)
 			}
@@ -86,7 +158,7 @@ func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) 
 				Zone:           z.zone,
 				CurrentValue:   z.allocatedCooling,
 				SuggestedValue: z.optimalCooling,
-				ExpectedSaving: powerDiff * 0.3,
+				ExpectedSaving: expectedSaving,
 				Reason:         reason,
 				Status:         "pending",
 			})
@@ -94,14 +166,6 @@ func OptimizeCoolingDistribution(cfg *Config) ([]OptimizationSuggestion, error) 
 	}
 
 	return suggestions, nil
-}
-
-func TriggerOptimization() {
-	cfg := LoadConfig()
-	_, err := OptimizeCoolingDistribution(cfg)
-	if err != nil {
-		log.Printf("optimization error: %v", err)
-	}
 }
 
 func GetZoneCoolingDemands() ([]ZoneCoolingDemand, error) {

@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"sync"
-	"time"
 
 	"dc-cooling-platform/backend"
 
@@ -105,90 +104,52 @@ func handleWebSocket(hub *WebSocketHub, w http.ResponseWriter, r *http.Request) 
 	}()
 }
 
-func modbusDataIngestion(ctx context.Context, hub *WebSocketHub, cfg *backend.Config) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+func eventRouter(ctx context.Context, hub *WebSocketHub, gateway *backend.ModbusGateway, calculator *backend.PUECalculator, optimizer *backend.CoolingOptimizer, notifier *backend.AlarmNotifier) {
+	telemetryOut := gateway.Output()
+	pueOut := calculator.Output()
+	suggestionOut := optimizer.Output()
+	alarmOut := notifier.Output()
+	telemetryIn := notifier.TelemetryCh()
+	pueIn := notifier.PUECh()
+	triggerCh := optimizer.TriggerCh()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			data, err := backend.ReceiveModbusData(cfg.ModbusHost, cfg.ModbusPort)
-			if err != nil {
-				log.Println("Modbus read error:", err)
-				continue
+
+		case batch := <-telemetryOut:
+			if err := backend.InsertTelemetry(batch); err != nil {
+				log.Println("Telemetry insert error:", err)
 			}
-			if len(data) > 0 {
-				if err := backend.InsertTelemetry(data); err != nil {
-					log.Println("Telemetry insert error:", err)
-					continue
+			msg, _ := json.Marshal(backend.WSMessage{Type: "telemetry", Data: batch})
+			hub.broadcast <- msg
+			select {
+			case telemetryIn <- batch:
+			default:
+			}
+
+		case record := <-pueOut:
+			msg, _ := json.Marshal(backend.WSMessage{Type: "pue_update", Data: record})
+			hub.broadcast <- msg
+			select {
+			case pueIn <- record:
+			default:
+			}
+			if record.PUEValue > optimizer.PUETriggerThreshold() {
+				select {
+				case triggerCh <- record:
+				default:
 				}
-				msg, _ := json.Marshal(backend.WSMessage{Type: "telemetry", Data: data})
-				hub.broadcast <- msg
 			}
-		}
-	}
-}
 
-func pueCalculation(ctx context.Context, hub *WebSocketHub, cfg *backend.Config) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			records, err := backend.CalculatePUE(cfg)
-			if err != nil {
-				log.Println("PUE calculation error:", err)
-				continue
-			}
-			if len(records) > 0 {
-				msg, _ := json.Marshal(backend.WSMessage{Type: "pue_update", Data: records})
-				hub.broadcast <- msg
-			}
-		}
-	}
-}
+		case suggestions := <-suggestionOut:
+			msg, _ := json.Marshal(backend.WSMessage{Type: "optimization", Data: suggestions})
+			hub.broadcast <- msg
 
-func alarmChecker(ctx context.Context, hub *WebSocketHub, cfg *backend.Config) {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			alarms, err := backend.CheckAlarms(cfg)
-			if err != nil {
-				log.Println("Alarm check error:", err)
-				continue
-			}
-			for _, alarm := range alarms {
-				msg, _ := json.Marshal(backend.WSMessage{Type: "alarm", Data: alarm})
-				hub.broadcast <- msg
-			}
-		}
-	}
-}
-
-func coolingOptimization(ctx context.Context, hub *WebSocketHub, cfg *backend.Config) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			suggestions, err := backend.OptimizeCoolingDistribution(cfg)
-			if err != nil {
-				log.Println("Optimization error:", err)
-				continue
-			}
-			if len(suggestions) > 0 {
-				msg, _ := json.Marshal(backend.WSMessage{Type: "optimization", Data: suggestions})
-				hub.broadcast <- msg
-			}
+		case alarms := <-alarmOut:
+			msg, _ := json.Marshal(backend.WSMessage{Type: "alarm", Data: alarms})
+			hub.broadcast <- msg
 		}
 	}
 }
@@ -204,16 +165,19 @@ func main() {
 	hub := NewWebSocketHub()
 	go hub.Run()
 
-	backend.InitModbusPool(cfg.ModbusHost, cfg.ModbusPort)
-	defer backend.StopModbusPool()
+	gateway := backend.NewModbusGateway(cfg)
+	calculator := backend.NewPUECalculator(cfg)
+	optimizer := backend.NewCoolingOptimizer(cfg)
+	notifier := backend.NewAlarmNotifier(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go modbusDataIngestion(ctx, hub, cfg)
-	go pueCalculation(ctx, hub, cfg)
-	go alarmChecker(ctx, hub, cfg)
-	go coolingOptimization(ctx, hub, cfg)
+	go gateway.Run(ctx)
+	go calculator.Run(ctx)
+	go optimizer.Run(ctx)
+	go notifier.Run(ctx)
+	go eventRouter(ctx, hub, gateway, calculator, optimizer, notifier)
 
 	r := mux.NewRouter()
 

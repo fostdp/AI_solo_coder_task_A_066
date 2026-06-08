@@ -372,5 +372,5 @@
         return new THREE.CanvasTexture(canvas);
     };
 
-    NS.Scene3D = Scene3D;
+    NS.Cooling3D = Scene3D;
 })(window);

@@ -1,0 +1,37 @@
+{
+  "modbus": {
+    "idle_timeout_seconds": 60,
+    "max_retries": 3,
+    "dial_timeout_seconds": 5,
+    "read_timeout_seconds": 10,
+    "collect_interval_seconds": 30
+  },
+  "pue": {
+    "calculate_interval_seconds": 300,
+    "distribution_loss_ratio": 0.03,
+    "it_default_power": 1000.0,
+    "pue_threshold_1": 1.4,
+    "pue_threshold_2": 1.5
+  },
+  "optimization": {
+    "interval_seconds": 600,
+    "diff_threshold": 0.05,
+    "saving_ratio": 0.3,
+    "heat_load_divisor": 10.0
+  },
+  "alarm": {
+    "check_interval_seconds": 60,
+    "level1_duration_minutes": 10,
+    "level2_duration_minutes": 30,
+    "level1_thresholds": {
+      "supply_temp": 15.0,
+      "return_temp": 25.0,
+      "pressure": 1.2,
+      "cop": 3.0,
+      "power_ratio": 1.1
+    },
+    "dingtalk_timeout_seconds": 10,
+    "dingtalk_max_retries": 3,
+    "dingtalk_retry_interval_seconds": 30
+  }
+}

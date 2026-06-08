@@ -36,7 +36,7 @@
     App.prototype.init = function () {
         var self = this;
 
-        this.scene3d = new CoolingPlatform.Scene3D();
+        this.scene3d = new CoolingPlatform.Cooling3D();
         this.scene3d.init('scene3d-container');
 
         this.scene3d.onDeviceClick(function (device) {
@@ -97,12 +97,12 @@
                         self.pueData = self.pueData.concat(pueRecords);
                     }
                     if (self.currentTab === 'pue') {
-                        CoolingPlatform.Charts.prototype.drawPUETrend('pue-chart', self.pueData);
+                        CoolingPlatform.PUEDashboard.prototype.drawPUETrend('pue-chart', self.pueData);
                     }
                     break;
                 case 'alarm':
                     self.alarms.unshift(msg.data);
-                    CoolingPlatform.Charts.prototype.drawAlarmList('alarm-list', self.alarms);
+                    CoolingPlatform.PUEDashboard.prototype.drawAlarmList('alarm-list', self.alarms);
                     self.updateAlarmCounts();
                     self.showNotification(msg.data);
                     break;
@@ -219,7 +219,7 @@
         api('/api/pue/trend?hours=24').then(function (data) {
             self.pueData = data;
             if (self.currentTab === 'pue') {
-                CoolingPlatform.Charts.prototype.drawPUETrend('pue-chart', data);
+                CoolingPlatform.PUEDashboard.prototype.drawPUETrend('pue-chart', data);
             }
         }).catch(function () {});
     };
@@ -228,7 +228,7 @@
         var self = this;
         api('/api/alarms?limit=50').then(function (data) {
             self.alarms = data;
-            CoolingPlatform.Charts.prototype.drawAlarmList('alarm-list', data);
+            CoolingPlatform.PUEDashboard.prototype.drawAlarmList('alarm-list', data);
         }).catch(function () {});
         this.updateAlarmCounts();
     };
@@ -267,7 +267,7 @@
         var self = this;
         api('/api/sankey').then(function (data) {
             if (self.currentTab === 'sankey') {
-                CoolingPlatform.Charts.prototype.drawSankey('sankey-chart', data);
+                CoolingPlatform.PUEDashboard.prototype.drawSankey('sankey-chart', data);
             }
         }).catch(function () {});
     };
@@ -276,7 +276,7 @@
         var self = this;
         api('/api/ranking').then(function (data) {
             if (self.currentTab === 'ranking') {
-                CoolingPlatform.Charts.prototype.drawRankingTable('ranking-table', data);
+                CoolingPlatform.PUEDashboard.prototype.drawRankingTable('ranking-table', data);
             }
         }).catch(function () {});
     };
@@ -307,7 +307,7 @@
         paramsEl.innerHTML = paramsHtml;
 
         api('/api/telemetry?device_id=' + device.id + '&hours=24').then(function (data) {
-            CoolingPlatform.Charts.prototype.drawDeviceTrend('device-trend-chart', data);
+            CoolingPlatform.PUEDashboard.prototype.drawDeviceTrend('device-trend-chart', data);
         }).catch(function () {});
 
         panel.classList.add('active');

@@ -34,9 +34,9 @@
         return RED;
     }
 
-    function Charts() {}
+    function PUEDashboard() {}
 
-    Charts.prototype.drawPUETrend = function (canvasId, data) {
+    PUEDashboard.prototype.drawPUETrend = function (canvasId, data) {
         var canvas = document.getElementById(canvasId);
         if (!canvas || !data || !data.length) return;
         var s = setupCanvas(canvas);
@@ -164,7 +164,7 @@
             cCtx.fillStyle = BG_COLOR;
             cCtx.fillRect(0, 0, w, h);
 
-            Charts.prototype.drawPUETrend(canvasId, chartData);
+            PUEDashboard.prototype.drawPUETrend(canvasId, chartData);
 
             if (mx < padRef.left || mx > padRef.left + cwRef || my < padRef.top || my > padRef.top + chRef) return;
 
@@ -227,7 +227,7 @@
         canvas.addEventListener('mousemove', canvas._pueHoverRef);
     };
 
-    Charts.prototype.drawSankey = function (canvasId, data) {
+    PUEDashboard.prototype.drawSankey = function (canvasId, data) {
         var canvas = document.getElementById(canvasId);
         if (!canvas || !data) return;
         var s = setupCanvas(canvas);
@@ -344,7 +344,7 @@
         return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
     }
 
-    Charts.prototype.drawDeviceTrend = function (canvasId, data) {
+    PUEDashboard.prototype.drawDeviceTrend = function (canvasId, data) {
         var canvas = document.getElementById(canvasId);
         if (!canvas || !data || !data.length) return;
         var s = setupCanvas(canvas);
@@ -459,7 +459,7 @@
                 var dpr = window.devicePixelRatio || 1;
                 var cCtx = canvas.getContext('2d');
                 cCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-                Charts.prototype.drawDeviceTrend(canvasId, chartData);
+                PUEDashboard.prototype.drawDeviceTrend(canvasId, chartData);
                 return;
             }
 
@@ -528,7 +528,7 @@
         canvas.addEventListener('mousemove', canvas._devHoverRef);
     };
 
-    Charts.prototype.drawRankingTable = function (containerId, data) {
+    PUEDashboard.prototype.drawRankingTable = function (containerId, data) {
         var container = document.getElementById(containerId);
         if (!container) return;
         if (!data || !data.length) {
@@ -576,7 +576,7 @@
         container.innerHTML = html;
     };
 
-    Charts.prototype.drawAlarmList = function (containerId, alarms) {
+    PUEDashboard.prototype.drawAlarmList = function (containerId, alarms) {
         var container = document.getElementById(containerId);
         if (!container) return;
         if (!alarms || !alarms.length) {
@@ -601,7 +601,7 @@
             html += '<span style="color:#546e7a;font-size:10px;">' + (alarm.time ? new Date(alarm.time).toLocaleString('zh-CN') : '') + '</span>';
 
             if (!alarm.acknowledged) {
-                html += '<button onclick="CoolingPlatform.Charts.ackAlarm(\'' + alarm.id + '\', this)" style="background:transparent;border:1px solid #1e3a5f;color:#90a4ae;font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;">确认</button>';
+                html += '<button onclick="CoolingPlatform.PUEDashboard.ackAlarm(\'' + alarm.id + '\', this)" style="background:transparent;border:1px solid #1e3a5f;color:#90a4ae;font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;">确认</button>';
             } else {
                 html += '<span style="color:#546e7a;font-size:10px;">已确认</span>';
             }
@@ -612,7 +612,7 @@
         container.innerHTML = html;
     };
 
-    Charts.ackAlarm = function (alarmId, btn) {
+    PUEDashboard.ackAlarm = function (alarmId, btn) {
         fetch('/api/alarms/' + alarmId + '/ack', { method: 'POST' })
             .then(function (res) {
                 if (res.ok) {
@@ -626,5 +626,5 @@
             .catch(function () {});
     };
 
-    NS.Charts = Charts;
+    NS.PUEDashboard = PUEDashboard;
 })(window);

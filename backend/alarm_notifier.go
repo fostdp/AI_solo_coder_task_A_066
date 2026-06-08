@@ -2,15 +2,77 @@ package backend
 
 import (
 	"bytes"
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
-func CheckAlarms(cfg *Config) ([]Alarm, error) {
+type AlarmNotifier struct {
+	cfg             *Config
+	telemetryCh     chan []DeviceTelemetry
+	pueCh           chan *PUERecord
+	outCh           chan []Alarm
+	stopCh          chan struct{}
+	pendingDingTalk []Alarm
+	mu              sync.Mutex
+}
+
+func NewAlarmNotifier(cfg *Config) *AlarmNotifier {
+	return &AlarmNotifier{
+		cfg:         cfg,
+		telemetryCh: make(chan []DeviceTelemetry, 16),
+		pueCh:       make(chan *PUERecord, 16),
+		outCh:       make(chan []Alarm, 16),
+		stopCh:      make(chan struct{}),
+	}
+}
+
+func (n *AlarmNotifier) TelemetryCh() chan<- []DeviceTelemetry {
+	return n.telemetryCh
+}
+
+func (n *AlarmNotifier) PUECh() chan<- *PUERecord {
+	return n.pueCh
+}
+
+func (n *AlarmNotifier) Output() <-chan []Alarm {
+	return n.outCh
+}
+
+func (n *AlarmNotifier) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(n.cfg.Alarm.CheckIntervalSeconds) * time.Second)
+	defer ticker.Stop()
+
+	go n.retryLoop(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			alarms, err := n.checkAlarms()
+			if err != nil {
+				log.Printf("alarm check error: %v", err)
+				continue
+			}
+			if len(alarms) > 0 {
+				select {
+				case n.outCh <- alarms:
+				default:
+					log.Printf("alarm output channel full, dropping alarms")
+				}
+			}
+		case <-n.telemetryCh:
+		case <-n.pueCh:
+		}
+	}
+}
+
+func (n *AlarmNotifier) checkAlarms() ([]Alarm, error) {
 	db := GetDB()
 	if db == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -18,7 +80,10 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 
 	var newAlarms []Alarm
 
-	rows, err := db.Query(`
+	thresholds := n.cfg.Alarm.Level1Thresholds
+	level1Threshold := n.cfg.Alarm.Level1DurationMinutes * 2
+
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT dt.device_id, COUNT(*) as cnt,
 			MAX(dt.supply_temp), MAX(dt.return_temp),
 			MAX(dt.pressure), MIN(dt.cop),
@@ -26,9 +91,11 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 		FROM device_telemetry dt
 		JOIN devices d ON dt.device_id = d.id
 		WHERE dt.time > NOW() - INTERVAL '15 minutes'
-			AND (dt.supply_temp > 15 OR dt.return_temp > 25 OR dt.pressure > 1.2 OR dt.cop < 3 OR dt.power > d.rated_power * 1.1)
+			AND (dt.supply_temp > $1 OR dt.return_temp > $2 OR dt.pressure > $3 OR dt.cop < $4 OR dt.power > d.rated_power * $5)
 		GROUP BY dt.device_id, d.rated_power
-		HAVING COUNT(*) >= 20`)
+		HAVING COUNT(*) >= $6`),
+		thresholds.SupplyTemp, thresholds.ReturnTemp, thresholds.Pressure,
+		thresholds.COP, thresholds.PowerRatio, level1Threshold)
 	if err != nil {
 		return nil, fmt.Errorf("query level 1 alarms: %w", err)
 	}
@@ -50,20 +117,20 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 		}
 
 		checks := []thresholdCheck{}
-		if maxSupplyTemp > 15 {
-			checks = append(checks, thresholdCheck{"supply_temp", maxSupplyTemp, 15, fmt.Sprintf("供水温度持续超过15°C，当前最大值: %.1f°C", maxSupplyTemp)})
+		if maxSupplyTemp > thresholds.SupplyTemp {
+			checks = append(checks, thresholdCheck{"supply_temp", maxSupplyTemp, thresholds.SupplyTemp, fmt.Sprintf("供水温度持续超过%.1f°C，当前最大值: %.1f°C", thresholds.SupplyTemp, maxSupplyTemp)})
 		}
-		if maxReturnTemp > 25 {
-			checks = append(checks, thresholdCheck{"return_temp", maxReturnTemp, 25, fmt.Sprintf("回水温度持续超过25°C，当前最大值: %.1f°C", maxReturnTemp)})
+		if maxReturnTemp > thresholds.ReturnTemp {
+			checks = append(checks, thresholdCheck{"return_temp", maxReturnTemp, thresholds.ReturnTemp, fmt.Sprintf("回水温度持续超过%.1f°C，当前最大值: %.1f°C", thresholds.ReturnTemp, maxReturnTemp)})
 		}
-		if maxPressure > 1.2 {
-			checks = append(checks, thresholdCheck{"pressure", maxPressure, 1.2, fmt.Sprintf("压力持续超过1.2MPa，当前最大值: %.2fMPa", maxPressure)})
+		if maxPressure > thresholds.Pressure {
+			checks = append(checks, thresholdCheck{"pressure", maxPressure, thresholds.Pressure, fmt.Sprintf("压力持续超过%.2fMPa，当前最大值: %.2fMPa", thresholds.Pressure, maxPressure)})
 		}
-		if minCOP < 3 {
-			checks = append(checks, thresholdCheck{"cop", minCOP, 3, fmt.Sprintf("COP持续低于3，当前最小值: %.2f", minCOP)})
+		if minCOP < thresholds.COP {
+			checks = append(checks, thresholdCheck{"cop", minCOP, thresholds.COP, fmt.Sprintf("COP持续低于%.1f，当前最小值: %.2f", thresholds.COP, minCOP)})
 		}
-		if ratedPower > 0 && maxPower > ratedPower*1.1 {
-			checks = append(checks, thresholdCheck{"power", maxPower, ratedPower * 1.1, fmt.Sprintf("功率持续超过额定功率1.1倍(%.1fkW)，当前最大值: %.1fkW", ratedPower*1.1, maxPower)})
+		if ratedPower > 0 && maxPower > ratedPower*thresholds.PowerRatio {
+			checks = append(checks, thresholdCheck{"power", maxPower, ratedPower * thresholds.PowerRatio, fmt.Sprintf("功率持续超过额定功率%.1f倍(%.1fkW)，当前最大值: %.1fkW", thresholds.PowerRatio, ratedPower*thresholds.PowerRatio, maxPower)})
 		}
 
 		for _, check := range checks {
@@ -85,7 +152,7 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 				MetricName:      check.metricName,
 				MetricValue:     check.metricValue,
 				Threshold:       check.threshold,
-				DurationMinutes: float64(cfg.AlarmLevel1Duration),
+				DurationMinutes: float64(n.cfg.Alarm.Level1DurationMinutes),
 				Acknowledged:    false,
 				DingTalkSent:    false,
 			}
@@ -104,13 +171,16 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 		return nil, fmt.Errorf("level 1 rows error: %w", err)
 	}
 
+	level2Window := n.cfg.Alarm.Level2DurationMinutes + 5
+	level2Threshold := n.cfg.Alarm.Level2DurationMinutes / 5
+
 	var pueCount int
-	err = db.QueryRow(`SELECT COUNT(*) FROM pue_records WHERE time > NOW() - INTERVAL '35 minutes' AND pue_value > $1`, cfg.PUEThreshold2).Scan(&pueCount)
+	err = db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM pue_records WHERE time > NOW() - INTERVAL '%d minutes' AND pue_value > $1`, level2Window), n.cfg.PUE.PUEThreshold2).Scan(&pueCount)
 	if err != nil {
 		return nil, fmt.Errorf("query level 2 alarms: %w", err)
 	}
 
-	if pueCount >= 6 {
+	if pueCount >= level2Threshold {
 		var exists bool
 		err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM alarms WHERE alarm_level = 2 AND alarm_type = 'pue_exceed' AND acknowledged = false)`).Scan(&exists)
 		if err != nil {
@@ -125,11 +195,11 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 				alarm := Alarm{
 					AlarmLevel:      2,
 					AlarmType:       "pue_exceed",
-					Message:         "PUE持续超过1.5超过30分钟",
+					Message:         fmt.Sprintf("PUE持续超过%.1f超过%d分钟", n.cfg.PUE.PUEThreshold2, n.cfg.Alarm.Level2DurationMinutes),
 					MetricName:      "pue",
 					MetricValue:     latestPUE,
-					Threshold:       1.5,
-					DurationMinutes: float64(cfg.AlarmLevel2Duration),
+					Threshold:       n.cfg.PUE.PUEThreshold2,
+					DurationMinutes: float64(n.cfg.Alarm.Level2DurationMinutes),
 					Acknowledged:    false,
 					DingTalkSent:    false,
 				}
@@ -146,9 +216,9 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 	}
 
 	for i := range newAlarms {
-		if cfg.DingTalkWebhook != "" {
-			if err := SendDingTalkNotification(cfg.DingTalkWebhook, newAlarms[i]); err != nil {
-				log.Printf("send dingtalk notification for alarm %d: %v", newAlarms[i].ID, err)
+		if n.cfg.DingTalkWebhook != "" {
+			if err := n.sendDingTalk(newAlarms[i]); err != nil {
+				log.Printf("send dingtalk for alarm %d: %v", newAlarms[i].ID, err)
 			}
 		}
 	}
@@ -156,7 +226,11 @@ func CheckAlarms(cfg *Config) ([]Alarm, error) {
 	return newAlarms, nil
 }
 
-func SendDingTalkNotification(webhook string, alarm Alarm) error {
+func (n *AlarmNotifier) sendDingTalk(alarm Alarm) error {
+	if n.cfg.DingTalkWebhook == "" {
+		return fmt.Errorf("dingtalk webhook not configured")
+	}
+
 	deviceStr := "系统"
 	if alarm.DeviceID != 0 {
 		deviceStr = fmt.Sprintf("Device %d", alarm.DeviceID)
@@ -176,14 +250,20 @@ func SendDingTalkNotification(webhook string, alarm Alarm) error {
 		return fmt.Errorf("marshal dingtalk payload: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(webhook, "application/json", bytes.NewReader(body))
+	client := &http.Client{Timeout: time.Duration(n.cfg.Alarm.DingTalkTimeoutSeconds) * time.Second}
+	resp, err := client.Post(n.cfg.DingTalkWebhook, "application/json", bytes.NewReader(body))
 	if err != nil {
+		n.mu.Lock()
+		n.pendingDingTalk = append(n.pendingDingTalk, alarm)
+		n.mu.Unlock()
 		return fmt.Errorf("send dingtalk request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
+		n.mu.Lock()
+		n.pendingDingTalk = append(n.pendingDingTalk, alarm)
+		n.mu.Unlock()
 		return fmt.Errorf("dingtalk returned status %d", resp.StatusCode)
 	}
 
@@ -196,6 +276,38 @@ func SendDingTalkNotification(webhook string, alarm Alarm) error {
 	}
 
 	return nil
+}
+
+func (n *AlarmNotifier) retryLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(n.cfg.Alarm.DingTalkRetryIntervalSec) * time.Second)
+	defer ticker.Stop()
+
+	retryCounts := make(map[int]int)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.mu.Lock()
+			pending := n.pendingDingTalk
+			n.pendingDingTalk = nil
+			n.mu.Unlock()
+
+			for _, alarm := range pending {
+				retryCounts[alarm.ID]++
+				if retryCounts[alarm.ID] > n.cfg.Alarm.DingTalkMaxRetries {
+					delete(retryCounts, alarm.ID)
+					continue
+				}
+				if err := n.sendDingTalk(alarm); err != nil {
+					log.Printf("retry dingtalk for alarm %d (attempt %d/%d): %v", alarm.ID, retryCounts[alarm.ID], n.cfg.Alarm.DingTalkMaxRetries, err)
+				} else {
+					delete(retryCounts, alarm.ID)
+				}
+			}
+		}
+	}
 }
 
 func GetAlarms(level int, acknowledged *bool, limit int) ([]Alarm, error) {

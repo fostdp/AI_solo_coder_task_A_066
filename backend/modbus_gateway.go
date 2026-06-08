@@ -1,9 +1,11 @@
 package backend
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -11,110 +13,229 @@ import (
 	"github.com/lib/pq"
 )
 
-type ModbusPool struct {
-	host       string
-	port       string
-	mu         sync.Mutex
-	conn       net.Conn
-	lastUsed   time.Time
-	idleLimit  time.Duration
-	maxRetries int
+type ModbusGateway struct {
+	cfg         *Config
+	mu          sync.Mutex
+	conn        net.Conn
+	lastUsed    time.Time
+	idleLimit   time.Duration
+	maxRetries  int
 	dialTimeout time.Duration
 	readTimeout time.Duration
-	stopCh     chan struct{}
+	outCh       chan []DeviceTelemetry
+	stopCh      chan struct{}
 }
 
-var modbusPool *ModbusPool
-var modbusPoolOnce sync.Once
-
-func InitModbusPool(host, port string) {
-	modbusPoolOnce = sync.Once{}
-	modbusPool = &ModbusPool{
-		host:        host,
-		port:        port,
-		idleLimit:   60 * time.Second,
-		maxRetries:  3,
-		dialTimeout: 5 * time.Second,
-		readTimeout: 10 * time.Second,
+func NewModbusGateway(cfg *Config) *ModbusGateway {
+	return &ModbusGateway{
+		cfg:         cfg,
+		idleLimit:   time.Duration(cfg.Modbus.IdleTimeoutSeconds) * time.Second,
+		maxRetries:  cfg.Modbus.MaxRetries,
+		dialTimeout: time.Duration(cfg.Modbus.DialTimeoutSeconds) * time.Second,
+		readTimeout: time.Duration(cfg.Modbus.ReadTimeoutSeconds) * time.Second,
+		outCh:       make(chan []DeviceTelemetry, 8),
 		stopCh:      make(chan struct{}),
 	}
-	go modbusPool.cleanupLoop()
 }
 
-func StopModbusPool() {
-	if modbusPool != nil {
-		close(modbusPool.stopCh)
-		modbusPool.mu.Lock()
-		if modbusPool.conn != nil {
-			modbusPool.conn.Close()
-			modbusPool.conn = nil
+func (g *ModbusGateway) Output() <-chan []DeviceTelemetry {
+	return g.outCh
+}
+
+func (g *ModbusGateway) Run(ctx context.Context) {
+	interval := time.Duration(g.cfg.Modbus.CollectIntervalSeconds) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	go g.cleanupLoop(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			g.invalidateConnection()
+			return
+		case <-ticker.C:
+			data, err := g.collect()
+			if err != nil {
+				log.Println("modbus collect error:", err)
+				continue
+			}
+			if data != nil {
+				select {
+				case g.outCh <- data:
+				default:
+					log.Println("modbus output channel full, dropping batch")
+				}
+			}
 		}
-		modbusPool.mu.Unlock()
 	}
 }
 
-func (p *ModbusPool) cleanupLoop() {
+func (g *ModbusGateway) collect() ([]DeviceTelemetry, error) {
+	type deviceRange struct {
+		startSlave int
+		count      int
+	}
+
+	deviceRanges := []deviceRange{
+		{1, 8},
+		{9, 12},
+		{21, 80},
+		{101, 20},
+	}
+
+	for attempt := 0; attempt < g.maxRetries; attempt++ {
+		conn, err := g.getConnection()
+		if err != nil {
+			g.invalidateConnection()
+			if attempt == g.maxRetries-1 {
+				return nil, fmt.Errorf("get connection after %d retries: %w", g.maxRetries, err)
+			}
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			log.Printf("modbus connection attempt %d failed, retrying in %v: %v", attempt+1, backoff, err)
+			time.Sleep(backoff)
+			continue
+		}
+
+		var results []DeviceTelemetry
+		var transactionID uint16
+		var readErr error
+
+		for _, dr := range deviceRanges {
+			for i := 0; i < dr.count; i++ {
+				slaveID := byte(dr.startSlave + i)
+				transactionID++
+
+				req := make([]byte, 12)
+				binary.BigEndian.PutUint16(req[0:2], transactionID)
+				binary.BigEndian.PutUint16(req[2:4], 0x0000)
+				binary.BigEndian.PutUint16(req[4:6], 6)
+				req[6] = slaveID
+				req[7] = 0x03
+				binary.BigEndian.PutUint16(req[8:10], 0x0000)
+				binary.BigEndian.PutUint16(req[10:12], 0x000A)
+
+				if _, err := conn.Write(req); err != nil {
+					readErr = fmt.Errorf("write modbus request slave %d: %w", slaveID, err)
+					break
+				}
+
+				header := make([]byte, 9)
+				if _, err := conn.Read(header); err != nil {
+					readErr = fmt.Errorf("read modbus header slave %d: %w", slaveID, err)
+					break
+				}
+
+				byteCount := int(header[8])
+				data := make([]byte, byteCount)
+				if _, err := conn.Read(data); err != nil {
+					readErr = fmt.Errorf("read modbus data slave %d: %w", slaveID, err)
+					break
+				}
+
+				readRegister := func(offset int) uint16 {
+					return binary.BigEndian.Uint16(data[offset*2 : offset*2+2])
+				}
+
+				t := DeviceTelemetry{
+					Time:            time.Now().UTC(),
+					DeviceID:        int(slaveID),
+					SupplyTemp:      float64(readRegister(0)) / 10.0,
+					ReturnTemp:      float64(readRegister(1)) / 10.0,
+					FlowRate:        float64(readRegister(2)) / 10.0,
+					Power:           float64(readRegister(3)) / 10.0,
+					Pressure:        float64(readRegister(4)) / 10.0,
+					COP:             float64(readRegister(5)) / 100.0,
+					CoolingCapacity: float64(readRegister(6)) / 10.0,
+					SetpointTemp:    float64(readRegister(7)) / 10.0,
+					Status:          int(readRegister(8)),
+				}
+				results = append(results, t)
+			}
+			if readErr != nil {
+				break
+			}
+		}
+
+		if readErr != nil {
+			g.invalidateConnection()
+			if attempt == g.maxRetries-1 {
+				return nil, readErr
+			}
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			log.Printf("modbus read attempt %d failed, retrying in %v: %v", attempt+1, backoff, readErr)
+			time.Sleep(backoff)
+			continue
+		}
+
+		return results, nil
+	}
+
+	return nil, fmt.Errorf("modbus collect failed after %d retries", g.maxRetries)
+}
+
+func (g *ModbusGateway) getConnection() (net.Conn, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.conn != nil {
+		if time.Since(g.lastUsed) > g.idleLimit {
+			g.conn.Close()
+			g.conn = nil
+		} else {
+			oneByte := make([]byte, 1)
+			g.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			_, err := g.conn.Read(oneByte)
+			g.conn.SetReadDeadline(time.Time{})
+			if err == nil || isTimeoutError2(err) {
+				g.conn.SetDeadline(time.Now().Add(g.readTimeout))
+				g.lastUsed = time.Now()
+				return g.conn, nil
+			}
+			g.conn.Close()
+			g.conn = nil
+		}
+	}
+
+	addr := fmt.Sprintf("%s:%s", g.cfg.ModbusHost, g.cfg.ModbusPort)
+	conn, err := net.DialTimeout("tcp", addr, g.dialTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("dial modbus %s: %w", addr, err)
+	}
+	conn.SetDeadline(time.Now().Add(g.readTimeout))
+	g.conn = conn
+	g.lastUsed = time.Now()
+	return conn, nil
+}
+
+func (g *ModbusGateway) invalidateConnection() {
+	g.mu.Lock()
+	if g.conn != nil {
+		g.conn.Close()
+		g.conn = nil
+	}
+	g.mu.Unlock()
+}
+
+func (g *ModbusGateway) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-p.stopCh:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.mu.Lock()
-			if p.conn != nil && time.Since(p.lastUsed) > p.idleLimit {
-				p.conn.Close()
-				p.conn = nil
+			g.mu.Lock()
+			if g.conn != nil && time.Since(g.lastUsed) > g.idleLimit {
+				g.conn.Close()
+				g.conn = nil
 			}
-			p.mu.Unlock()
+			g.mu.Unlock()
 		}
 	}
 }
 
-func (p *ModbusPool) getConnection() (net.Conn, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.conn != nil {
-		if time.Since(p.lastUsed) > p.idleLimit {
-			p.conn.Close()
-			p.conn = nil
-		} else {
-			oneByte := make([]byte, 1)
-			p.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-			_, err := p.conn.Read(oneByte)
-			p.conn.SetReadDeadline(time.Time{})
-			if err == nil || isTimeoutError(err) {
-				p.conn.SetDeadline(time.Now().Add(p.readTimeout))
-				p.lastUsed = time.Now()
-				return p.conn, nil
-			}
-			p.conn.Close()
-			p.conn = nil
-		}
-	}
-
-	addr := fmt.Sprintf("%s:%s", p.host, p.port)
-	conn, err := net.DialTimeout("tcp", addr, p.dialTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("dial modbus %s: %w", addr, err)
-	}
-	conn.SetDeadline(time.Now().Add(p.readTimeout))
-	p.conn = conn
-	p.lastUsed = time.Now()
-	return conn, nil
-}
-
-func (p *ModbusPool) invalidateConnection() {
-	p.mu.Lock()
-	if p.conn != nil {
-		p.conn.Close()
-		p.conn = nil
-	}
-	p.mu.Unlock()
-}
-
-func isTimeoutError(err error) bool {
+func isTimeoutError2(err error) bool {
 	if netErr, ok := err.(net.Error); ok {
 		return netErr.Timeout()
 	}
@@ -208,109 +329,6 @@ func GetDeviceTelemetryHistory(deviceID int, hours int) ([]DeviceTelemetry, erro
 	return result, nil
 }
 
-func ReceiveModbusData(modbusHost string, modbusPort string) ([]DeviceTelemetry, error) {
-	if modbusPool == nil {
-		InitModbusPool(modbusHost, modbusPort)
-	}
-
-	type deviceRange struct {
-		startSlave int
-		count      int
-		deviceType string
-	}
-
-	deviceRanges := []deviceRange{
-		{1, 8, "chiller"},
-		{9, 12, "cooling_tower"},
-		{21, 80, "precision_ac"},
-		{101, 20, "cdu"},
-	}
-
-	var results []DeviceTelemetry
-	var transactionID uint16
-
-	for attempt := 0; attempt < modbusPool.maxRetries; attempt++ {
-		conn, err := modbusPool.getConnection()
-		if err != nil {
-			modbusPool.invalidateConnection()
-			continue
-		}
-
-		results = results[:0]
-		transactionID = 0
-		var readErr error
-
-		for _, dr := range deviceRanges {
-			for i := 0; i < dr.count; i++ {
-				slaveID := byte(dr.startSlave + i)
-				transactionID++
-
-				req := make([]byte, 12)
-				binary.BigEndian.PutUint16(req[0:2], transactionID)
-				binary.BigEndian.PutUint16(req[2:4], 0x0000)
-				binary.BigEndian.PutUint16(req[4:6], 6)
-				req[6] = slaveID
-				req[7] = 0x03
-				binary.BigEndian.PutUint16(req[8:10], 0x0000)
-				binary.BigEndian.PutUint16(req[10:12], 0x000A)
-
-				if _, err := conn.Write(req); err != nil {
-					readErr = fmt.Errorf("write modbus request slave %d: %w", slaveID, err)
-					break
-				}
-
-				header := make([]byte, 9)
-				if _, err := conn.Read(header); err != nil {
-					readErr = fmt.Errorf("read modbus header slave %d: %w", slaveID, err)
-					break
-				}
-
-				byteCount := int(header[8])
-				data := make([]byte, byteCount)
-				if _, err := conn.Read(data); err != nil {
-					readErr = fmt.Errorf("read modbus data slave %d: %w", slaveID, err)
-					break
-				}
-
-				readRegister := func(offset int) uint16 {
-					return binary.BigEndian.Uint16(data[offset*2 : offset*2+2])
-				}
-
-				t := DeviceTelemetry{
-					Time:            time.Now().UTC(),
-					DeviceID:        int(slaveID),
-					SupplyTemp:      float64(readRegister(0)) / 10.0,
-					ReturnTemp:      float64(readRegister(1)) / 10.0,
-					FlowRate:        float64(readRegister(2)) / 10.0,
-					Power:           float64(readRegister(3)) / 10.0,
-					Pressure:        float64(readRegister(4)) / 10.0,
-					COP:             float64(readRegister(5)) / 100.0,
-					CoolingCapacity: float64(readRegister(6)) / 10.0,
-					SetpointTemp:    float64(readRegister(7)) / 10.0,
-					Status:          int(readRegister(8)),
-				}
-				results = append(results, t)
-			}
-			if readErr != nil {
-				break
-			}
-		}
-
-		if readErr != nil {
-			modbusPool.invalidateConnection()
-			if attempt == modbusPool.maxRetries-1 {
-				return nil, readErr
-			}
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
-
-		return results, nil
-	}
-
-	return results, nil
-}
-
 func COPColor(cop float64) string {
 	if cop > 6 {
 		return "green"
@@ -332,7 +350,6 @@ func GetDeviceLatestStates() ([]DeviceLatestState, error) {
 	var result []DeviceLatestState
 	for rows.Next() {
 		var d Device
-		var t DeviceTelemetry
 		var tTime sql.NullTime
 		var tDeviceID sql.NullInt64
 		var tSupplyTemp sql.NullFloat64

@@ -1,11 +1,57 @@
 package backend
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"time"
 )
 
-func CalculatePUE(cfg *Config) ([]PUERecord, error) {
+type PUECalculator struct {
+	cfg    *Config
+	outCh  chan *PUERecord
+	stopCh chan struct{}
+}
+
+func NewPUECalculator(cfg *Config) *PUECalculator {
+	return &PUECalculator{
+		cfg:    cfg,
+		outCh:  make(chan *PUERecord, 8),
+		stopCh: make(chan struct{}),
+	}
+}
+
+func (c *PUECalculator) Output() <-chan *PUERecord {
+	return c.outCh
+}
+
+func (c *PUECalculator) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(c.cfg.PUE.CalculateIntervalSeconds) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			record, err := c.calculate()
+			if err != nil {
+				log.Printf("PUE calculation error: %v", err)
+				continue
+			}
+			if record != nil {
+				select {
+				case c.outCh <- record:
+				default:
+					log.Printf("PUE output channel full, dropping record")
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *PUECalculator) calculate() (*PUERecord, error) {
 	db := GetDB()
 
 	var coolingPower float64
@@ -15,16 +61,16 @@ func CalculatePUE(cfg *Config) ([]PUERecord, error) {
 	}
 
 	var grossITPower float64
-	err = db.QueryRow(`SELECT COALESCE(AVG(total_it_power), $1) FROM it_power_readings WHERE time > NOW() - INTERVAL '5 minutes'`, cfg.ITDefaultPower).Scan(&grossITPower)
+	err = db.QueryRow(`SELECT COALESCE(AVG(total_it_power), $1) FROM it_power_readings WHERE time > NOW() - INTERVAL '5 minutes'`, c.cfg.PUE.ITDefaultPower).Scan(&grossITPower)
 	if err != nil {
 		return nil, fmt.Errorf("query it power: %w", err)
 	}
 
 	if grossITPower == 0 {
-		grossITPower = cfg.ITDefaultPower
+		grossITPower = c.cfg.PUE.ITDefaultPower
 	}
 
-	distributionLoss := grossITPower * cfg.DistributionLossRatio
+	distributionLoss := grossITPower * c.cfg.PUE.DistributionLossRatio
 	pureITPower := grossITPower - distributionLoss
 
 	if pureITPower <= 0 {
@@ -40,17 +86,13 @@ func CalculatePUE(cfg *Config) ([]PUERecord, error) {
 		return nil, fmt.Errorf("insert pue record: %w", err)
 	}
 
-	if pueValue > cfg.PUEThreshold1 {
-		TriggerOptimization()
-	}
-
 	var record PUERecord
 	err = db.QueryRow(`SELECT time, it_power, distribution_loss, cooling_power, total_power, pue_value FROM pue_records ORDER BY time DESC LIMIT 1`).Scan(&record.Time, &record.ITPower, &record.DistributionLoss, &record.CoolingPower, &record.TotalPower, &record.PUEValue)
 	if err != nil {
 		return nil, fmt.Errorf("query new pue record: %w", err)
 	}
 
-	return []PUERecord{record}, nil
+	return &record, nil
 }
 
 func GetPUETrend(hours int) ([]PUERecord, error) {
