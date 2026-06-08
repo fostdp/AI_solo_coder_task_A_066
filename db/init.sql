@@ -31,6 +31,7 @@ CREATE INDEX idx_telemetry_device_time ON device_telemetry (device_id, time DESC
 CREATE TABLE IF NOT EXISTS pue_records (
     time TIMESTAMPTZ NOT NULL,
     it_power FLOAT NOT NULL,
+    distribution_loss FLOAT NOT NULL DEFAULT 0,
     cooling_power FLOAT NOT NULL,
     total_power FLOAT NOT NULL,
     pue_value FLOAT NOT NULL
@@ -261,3 +262,10 @@ SELECT add_continuous_aggregate_policy('device_telemetry_1hour',
 SELECT add_retention_policy('device_telemetry', INTERVAL '90 days');
 SELECT add_retention_policy('pue_records', INTERVAL '365 days');
 SELECT add_retention_policy('alarms', INTERVAL '180 days');
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pue_records' AND column_name = 'distribution_loss') THEN
+        ALTER TABLE pue_records ADD COLUMN distribution_loss FLOAT NOT NULL DEFAULT 0;
+    END IF;
+END $$;

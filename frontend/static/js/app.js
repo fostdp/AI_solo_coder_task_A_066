@@ -93,7 +93,7 @@
                     var pueRecords = Array.isArray(msg.data) ? msg.data : [msg.data];
                     if (pueRecords.length > 0) {
                         var lastRecord = pueRecords[pueRecords.length - 1];
-                        self.updatePUEDisplay(lastRecord.pue_value);
+                        self.updatePUEDisplay(lastRecord);
                         self.pueData = self.pueData.concat(pueRecords);
                     }
                     if (self.currentTab === 'pue') {
@@ -212,7 +212,9 @@
     App.prototype.fetchPUE = function () {
         var self = this;
         api('/api/pue/current').then(function (data) {
-            self.updatePUEDisplay(data.pue_value || data.pue);
+            if (data) {
+                self.updatePUEDisplay(data);
+            }
         }).catch(function () {});
         api('/api/pue/trend?hours=24').then(function (data) {
             self.pueData = data;
@@ -341,7 +343,18 @@
     App.prototype.updatePUEDisplay = function (pue) {
         var el = document.getElementById('pue-value');
         var indicator = document.getElementById('pue-indicator');
-        el.textContent = pue.toFixed(2);
+        if (typeof pue === 'object' && pue !== null) {
+            var pueVal = pue.pue_value || pue.pue;
+            var distLoss = pue.distribution_loss;
+            el.textContent = pueVal.toFixed(2);
+            var distEl = document.getElementById('pue-dist-loss');
+            if (distEl && distLoss != null) {
+                distEl.textContent = '配电损耗: ' + distLoss.toFixed(1) + ' kW';
+            }
+            pue = pueVal;
+        } else {
+            el.textContent = pue.toFixed(2);
+        }
         el.classList.remove('pulse');
         if (pue < 1.4) {
             el.style.color = '#00e676';

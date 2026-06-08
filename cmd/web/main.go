@@ -204,6 +204,9 @@ func main() {
 	hub := NewWebSocketHub()
 	go hub.Run()
 
+	backend.InitModbusPool(cfg.ModbusHost, cfg.ModbusPort)
+	defer backend.StopModbusPool()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

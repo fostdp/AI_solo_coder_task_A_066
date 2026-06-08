@@ -196,9 +196,10 @@
                 formatTime(pt.time),
                 'PUE: ' + pt.pue_value.toFixed(2),
                 'IT: ' + (pt.it_power != null ? pt.it_power.toFixed(1) + ' kW' : '-'),
-                'Cooling: ' + (pt.cooling_power != null ? pt.cooling_power.toFixed(1) + ' kW' : '-')
+                'Cooling: ' + (pt.cooling_power != null ? pt.cooling_power.toFixed(1) + ' kW' : '-'),
+                'Dist.Loss: ' + (pt.distribution_loss != null ? pt.distribution_loss.toFixed(1) + ' kW' : '-')
             ];
-            var tipW = 130, tipH = tipLines.length * 18 + 10;
+            var tipW = 150, tipH = tipLines.length * 18 + 10;
             var tx = px + 10, ty = py - tipH / 2;
             if (tx + tipW > w - padRef.right) tx = px - tipW - 10;
             if (ty < padRef.top) ty = padRef.top;

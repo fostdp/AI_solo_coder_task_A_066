@@ -14,20 +14,28 @@ func CalculatePUE(cfg *Config) ([]PUERecord, error) {
 		return nil, fmt.Errorf("query cooling power: %w", err)
 	}
 
-	var itPower float64
-	err = db.QueryRow(`SELECT COALESCE(AVG(total_it_power), $1) FROM it_power_readings WHERE time > NOW() - INTERVAL '5 minutes'`, cfg.ITDefaultPower).Scan(&itPower)
+	var grossITPower float64
+	err = db.QueryRow(`SELECT COALESCE(AVG(total_it_power), $1) FROM it_power_readings WHERE time > NOW() - INTERVAL '5 minutes'`, cfg.ITDefaultPower).Scan(&grossITPower)
 	if err != nil {
 		return nil, fmt.Errorf("query it power: %w", err)
 	}
 
-	if itPower == 0 {
-		itPower = cfg.ITDefaultPower
+	if grossITPower == 0 {
+		grossITPower = cfg.ITDefaultPower
 	}
 
-	totalPower := itPower + coolingPower
-	pueValue := totalPower / itPower
+	distributionLoss := grossITPower * cfg.DistributionLossRatio
+	pureITPower := grossITPower - distributionLoss
 
-	_, err = db.Exec(`INSERT INTO pue_records (time, it_power, cooling_power, total_power, pue_value) VALUES (NOW(), $1, $2, $3, $4)`, itPower, coolingPower, totalPower, pueValue)
+	if pureITPower <= 0 {
+		pureITPower = grossITPower * 0.97
+		distributionLoss = grossITPower * 0.03
+	}
+
+	totalPower := pureITPower + coolingPower + distributionLoss
+	pueValue := totalPower / pureITPower
+
+	_, err = db.Exec(`INSERT INTO pue_records (time, it_power, distribution_loss, cooling_power, total_power, pue_value) VALUES (NOW(), $1, $2, $3, $4, $5)`, pureITPower, distributionLoss, coolingPower, totalPower, pueValue)
 	if err != nil {
 		return nil, fmt.Errorf("insert pue record: %w", err)
 	}
@@ -37,7 +45,7 @@ func CalculatePUE(cfg *Config) ([]PUERecord, error) {
 	}
 
 	var record PUERecord
-	err = db.QueryRow(`SELECT time, it_power, cooling_power, total_power, pue_value FROM pue_records ORDER BY time DESC LIMIT 1`).Scan(&record.Time, &record.ITPower, &record.CoolingPower, &record.TotalPower, &record.PUEValue)
+	err = db.QueryRow(`SELECT time, it_power, distribution_loss, cooling_power, total_power, pue_value FROM pue_records ORDER BY time DESC LIMIT 1`).Scan(&record.Time, &record.ITPower, &record.DistributionLoss, &record.CoolingPower, &record.TotalPower, &record.PUEValue)
 	if err != nil {
 		return nil, fmt.Errorf("query new pue record: %w", err)
 	}
@@ -47,7 +55,7 @@ func CalculatePUE(cfg *Config) ([]PUERecord, error) {
 
 func GetPUETrend(hours int) ([]PUERecord, error) {
 	db := GetDB()
-	query := fmt.Sprintf(`SELECT time, it_power, cooling_power, total_power, pue_value FROM pue_records WHERE time > NOW() - INTERVAL '%d hours' ORDER BY time ASC`, hours)
+	query := fmt.Sprintf(`SELECT time, it_power, distribution_loss, cooling_power, total_power, pue_value FROM pue_records WHERE time > NOW() - INTERVAL '%d hours' ORDER BY time ASC`, hours)
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("query pue trend: %w", err)
@@ -57,7 +65,7 @@ func GetPUETrend(hours int) ([]PUERecord, error) {
 	var result []PUERecord
 	for rows.Next() {
 		var r PUERecord
-		if err := rows.Scan(&r.Time, &r.ITPower, &r.CoolingPower, &r.TotalPower, &r.PUEValue); err != nil {
+		if err := rows.Scan(&r.Time, &r.ITPower, &r.DistributionLoss, &r.CoolingPower, &r.TotalPower, &r.PUEValue); err != nil {
 			return nil, fmt.Errorf("scan pue record: %w", err)
 		}
 		result = append(result, r)
@@ -73,7 +81,7 @@ func GetPUETrend(hours int) ([]PUERecord, error) {
 func GetCurrentPUE() (*PUERecord, error) {
 	db := GetDB()
 	var record PUERecord
-	err := db.QueryRow(`SELECT time, it_power, cooling_power, total_power, pue_value FROM pue_records ORDER BY time DESC LIMIT 1`).Scan(&record.Time, &record.ITPower, &record.CoolingPower, &record.TotalPower, &record.PUEValue)
+	err := db.QueryRow(`SELECT time, it_power, distribution_loss, cooling_power, total_power, pue_value FROM pue_records ORDER BY time DESC LIMIT 1`).Scan(&record.Time, &record.ITPower, &record.DistributionLoss, &record.CoolingPower, &record.TotalPower, &record.PUEValue)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

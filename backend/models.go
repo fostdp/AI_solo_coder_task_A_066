@@ -27,11 +27,12 @@ type DeviceTelemetry struct {
 }
 
 type PUERecord struct {
-	Time         time.Time `json:"time"`
-	ITPower      float64   `json:"it_power"`
-	CoolingPower float64   `json:"cooling_power"`
-	TotalPower   float64   `json:"total_power"`
-	PUEValue     float64   `json:"pue_value"`
+	Time             time.Time `json:"time"`
+	ITPower          float64   `json:"it_power"`
+	DistributionLoss float64   `json:"distribution_loss"`
+	CoolingPower     float64   `json:"cooling_power"`
+	TotalPower       float64   `json:"total_power"`
+	PUEValue         float64   `json:"pue_value"`
 }
 
 type ZoneCoolingDemand struct {

@@ -112,6 +112,12 @@ body {
   transition: background 0.3s, box-shadow 0.3s;
 }
 
+.pue-dist-loss {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
 .pue-indicator.warning {
   background: var(--accent-yellow);
   box-shadow: 0 0 10px var(--accent-yellow);
